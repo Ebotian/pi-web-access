@@ -1,15 +1,19 @@
 import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import { normalizeDomain } from "./domain-filter-normalization.ts";
+import type { ExtractedContent, ExtractOptions } from "./extract.ts";
 import type { SearchOptions, SearchResponse } from "./perplexity.ts";
 import { formatSearchResultsAsAnswer } from "./search-answer-formatting.ts";
 import { normalizeSearchResultCount } from "./search-result-count-normalization.ts";
 import { hasCredentialSource, redactCredential, resolveCredential } from "./credential-source.ts";
+import { loadFetchContentDomainPolicy, loadSsrfConfig, validateRemoteUrl } from "./ssrf-protection.ts";
 import { fetchWithCredentialRedirects, getWebSearchConfigPath } from "./utils.ts";
 
 const DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search";
+const DEEPSEEK_FETCH_URL = "https://api.deepseek.com/v1/tools/fetch";
 const CONFIG_PATH = getWebSearchConfigPath();
 const SEARCH_TIMEOUT_MS = 30_000;
+const FETCH_TIMEOUT_MS = 60_000;
 // The API rejects queries over 128 Unicode characters, operators included.
 const MAX_QUERY_CHARS = 128;
 // `summary` is documented as 600-800 characters and written for models; keep it whole.
@@ -30,6 +34,11 @@ interface DeepSeekResult {
 	url?: unknown;
 	snippet?: unknown;
 	summary?: unknown;
+	content?: unknown;
+}
+
+interface DeepSeekSearchOptions extends SearchOptions {
+	includeContent?: boolean;
 }
 
 let cachedConfig: WebSearchConfig | null = null;
@@ -126,7 +135,7 @@ export function isDeepSeekAvailable(): boolean {
 	return hasCredentialSource({ provider: "DeepSeek", configuredValue: loadConfig().deepseekApiKey, environmentValue: process.env.DEEPSEEK_API_KEY });
 }
 
-export async function searchWithDeepSeek(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
+export async function searchWithDeepSeek(query: string, options: DeepSeekSearchOptions = {}): Promise<SearchResponse> {
 	const builtQuery = buildQuery(query, options);
 	const apiKey = await requireApiKey(options.signal);
 	const numResults = normalizeSearchResultCount(options.numResults);
@@ -142,7 +151,7 @@ export async function searchWithDeepSeek(query: string, options: SearchOptions =
 				"Content-Type": "application/json",
 				Authorization: `Bearer ${apiKey}`,
 			},
-			body: JSON.stringify({ query: builtQuery, count: numResults }),
+			body: JSON.stringify({ query: builtQuery, count: numResults, ...(options.includeContent ? { need_content: true } : {}) }),
 			signal: options.signal ? AbortSignal.any([timeoutSignal, options.signal]) : timeoutSignal,
 		}, ["Authorization"]);
 		if (!response.ok) {
@@ -178,6 +187,7 @@ export async function searchWithDeepSeek(query: string, options: SearchOptions =
 	}
 	activityMonitor.logComplete(activityId, response.status);
 	const results: SearchResponse["results"] = [];
+	const inlineContent: ExtractedContent[] = [];
 	const seen = new Set<string>();
 	for (const entry of entries) {
 		if (!entry || typeof entry !== "object") continue;
@@ -191,14 +201,97 @@ export async function searchWithDeepSeek(query: string, options: SearchOptions =
 		if (resultUrl.protocol !== "http:" && resultUrl.protocol !== "https:") continue;
 		if (seen.has(resultUrl.href)) continue;
 		seen.add(resultUrl.href);
+		const title = text(entry.title) || `Source ${results.length + 1}`;
 		results.push({
-			title: text(entry.title) || `Source ${results.length + 1}`,
+			title,
 			url: resultUrl.href,
 			snippet: (text(entry.summary) || text(entry.snippet)).slice(0, MAX_SNIPPET_CHARS),
 		});
+		if (options.includeContent) {
+			const content = typeof entry.content === "string" ? entry.content.trim() : "";
+			if (content) inlineContent.push({ url: resultUrl.href, title, content, error: null });
+		}
 		if (results.length >= numResults) break;
 	}
 	// A non-empty page with no usable entry is a broken response, not "no results", so routing can fall back.
 	if (entries.length > 0 && results.length === 0) throw new Error("DeepSeek returned invalid response: no result had an http(s) URL");
-	return { answer: formatSearchResultsAsAnswer(results), results };
+	const searchResponse: SearchResponse = { answer: formatSearchResultsAsAnswer(results), results };
+	if (inlineContent.length > 0) searchResponse.inlineContent = inlineContent;
+	return searchResponse;
+}
+
+/**
+ * Fetch a single page through DeepSeek's Fetch API, which returns page content
+ * already converted to Markdown. Opt-in via `fetchRouting.providers`.
+ */
+export async function extractWithDeepSeek(
+	url: string,
+	signal?: AbortSignal,
+	options: ExtractOptions = {},
+): Promise<ExtractedContent | null> {
+	const apiKey = await requireApiKey(signal);
+	const activityId = activityMonitor.logStart({ type: "fetch", url });
+	const timeoutMs = options.timeoutMs ?? FETCH_TIMEOUT_MS;
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	try {
+		const ssrf = loadSsrfConfig();
+		await validateRemoteUrl(url, {
+			allowRanges: ssrf.allowRanges,
+			trustEnvProxy: ssrf.trustEnvProxy,
+			domainPolicy: loadFetchContentDomainPolicy(),
+			...(options.lookup ? { lookup: options.lookup } : {}),
+		});
+		const response = await fetchWithCredentialRedirects(DEEPSEEK_FETCH_URL, {
+			method: "POST",
+			headers: {
+				Accept: "application/json",
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${apiKey}`,
+			},
+			body: JSON.stringify({ url }),
+			signal: signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal,
+		}, ["Authorization"]);
+		if (!response.ok) {
+			const errorText = redactCredential(describeError(await response.text()), apiKey).slice(0, 300);
+			throw new Error(`DeepSeek Fetch error ${response.status}: ${errorText}`);
+		}
+		let rawData: unknown;
+		try {
+			rawData = await response.json();
+		} catch (err) {
+			if (err instanceof Error && err.name === "TimeoutError") throw err;
+			throw new Error(`DeepSeek Fetch returned invalid JSON: ${errorMessage(err)}`);
+		}
+		if (!rawData || typeof rawData !== "object" || Array.isArray(rawData)) {
+			throw new Error("DeepSeek Fetch returned an unexpected response shape");
+		}
+		const page = rawData as { title?: unknown; content?: unknown };
+		const content = typeof page.content === "string" ? page.content.trim() : "";
+		if (!content) {
+			activityMonitor.logComplete(activityId, response.status);
+			return null;
+		}
+		activityMonitor.logComplete(activityId, response.status);
+		return {
+			url,
+			title: typeof page.title === "string" ? page.title.trim() : "",
+			content,
+			error: null,
+		};
+	} catch (err) {
+		const message = errorMessage(err);
+		if (signal?.aborted) {
+			activityMonitor.logComplete(activityId, 0);
+			throw new Error("Aborted");
+		}
+		activityMonitor.logError(activityId, redactCredential(message, apiKey));
+		if (err instanceof Error && err.name === "TimeoutError") {
+			throw new Error(`DeepSeek Fetch request timed out after ${Math.round(timeoutMs / 1000)}s`);
+		}
+		const redactedMessage = redactCredential(message, apiKey);
+		if (redactedMessage === message) throw err;
+		const redactedError = new Error(redactedMessage);
+		if (err instanceof Error) redactedError.name = err.name;
+		throw redactedError;
+	}
 }

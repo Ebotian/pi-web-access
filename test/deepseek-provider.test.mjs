@@ -167,3 +167,76 @@ test("DeepSeek appears in the Curator", async () => {
 	assert.match(html, />DeepSeek<\/button>/);
 	assert.match(html, /provider === "deepseek"\) return "DeepSeek"/);
 });
+
+test("DeepSeek includeContent requests native page content and maps inlineContent", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
+	const output = runChild(`
+		const bodies = [];
+		globalThis.fetch = async (_url, init) => {
+			bodies.push(JSON.parse(init.body));
+			return new Response(${JSON.stringify(page([
+				{ title: "A", url: "https://example.com/a", summary: "sum", content: "  # A\n\nbody  " },
+				{ title: "B", url: "https://example.com/b", summary: "sum-b", content: "" },
+			]))});
+		};
+		const { searchWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
+		const withContent = await searchWithDeepSeek("q", { includeContent: true });
+		const without = await searchWithDeepSeek("q");
+		console.log(JSON.stringify({ bodies, withContent, without }));
+	`, { PI_CODING_AGENT_DIR: home });
+	assert.deepEqual(output.bodies, [
+		{ query: "q", count: 5, need_content: true },
+		{ query: "q", count: 5 },
+	]);
+	assert.deepEqual(output.withContent.inlineContent, [
+		{ url: "https://example.com/a", title: "A", content: "# A\n\nbody", error: null },
+	]);
+	assert.equal(output.withContent.results.length, 2);
+	assert.equal(output.without.inlineContent, undefined);
+}));
+
+test("DeepSeek Fetch posts the URL and maps Markdown content", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
+	const output = runChild(`
+		let captured;
+		globalThis.fetch = async (url, init) => {
+			captured = { url: String(url), method: init.method, headers: { ...init.headers }, body: JSON.parse(init.body) };
+			return new Response(JSON.stringify({ title: " Example article ", content: "# Example article\\n\\nBody." }), { status: 200 });
+		};
+		const { extractWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
+		const page = await extractWithDeepSeek("https://example.com/article", undefined, { lookup: async () => [{ address: "93.184.216.34", family: 4 }] });
+		console.log(JSON.stringify({ captured, page }));
+	`, { PI_CODING_AGENT_DIR: home });
+	assert.equal(output.captured.url, "https://api.deepseek.com/v1/tools/fetch");
+	assert.equal(output.captured.method, "POST");
+	assert.equal(output.captured.headers.Authorization, "Bearer ds-key");
+	assert.deepEqual(output.captured.body, { url: "https://example.com/article" });
+	assert.deepEqual(output.page, {
+		url: "https://example.com/article",
+		title: "Example article",
+		content: "# Example article\n\nBody.",
+		error: null,
+	});
+}));
+
+test("DeepSeek Fetch redacts errors, returns null for empty content, and refuses private targets", () => withHome({ deepseekApiKey: "ds-secret" }, (home) => {
+	const output = runChild(`
+		const responses = [
+			new Response(JSON.stringify({ error: { message: "policy rejected ds-secret" } }), { status: 403 }),
+			new Response(JSON.stringify({ title: "empty", content: "" }), { status: 200 }),
+		];
+		const calls = [];
+		globalThis.fetch = async (url) => { calls.push(String(url)); return responses.shift(); };
+		const { extractWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
+		const lookup = async () => [{ address: "93.184.216.34", family: 4 }];
+		let error;
+		try { await extractWithDeepSeek("https://example.com/x", undefined, { lookup }); } catch (err) { error = String(err); }
+		const empty = await extractWithDeepSeek("https://example.com/y", undefined, { lookup });
+		let privateError;
+		try { await extractWithDeepSeek("http://127.0.0.1/admin", undefined, { lookup: async () => [{ address: "127.0.0.1", family: 4 }] }); } catch (err) { privateError = String(err); }
+		console.log(JSON.stringify({ error, empty, privateError, calls }));
+	`, { PI_CODING_AGENT_DIR: home });
+	assert.match(output.error, /DeepSeek Fetch error 403: policy rejected \[redacted\]/);
+	assert.doesNotMatch(output.error, /ds-secret/);
+	assert.equal(output.empty, null);
+	assert.match(output.privateError, /Blocked internal address/);
+	assert.deepEqual(output.calls, ["https://api.deepseek.com/v1/tools/fetch", "https://api.deepseek.com/v1/tools/fetch"]);
+}));
