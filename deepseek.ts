@@ -155,12 +155,40 @@ export function normalizeDeepSeekMarkdown(markdown: string): string {
 		.join("\n");
 }
 
+const ERROR_TITLE = /^(?:404\b|page not found\b|not found\b)/i;
+
+function firstMarkdownHeading(content: string): string {
+	let fence: { char: string; length: number } | null = null;
+	for (const line of content.split("\n")) {
+		const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+		if (fenceMatch) {
+			const marker = fenceMatch[1]!;
+			if (fence === null) {
+				fence = { char: marker[0]!, length: marker.length };
+			} else if (
+				marker[0] === fence.char &&
+				marker.length >= fence.length &&
+				line.slice(fenceMatch[0].length).trim() === ""
+			) {
+				fence = null;
+			}
+			continue;
+		}
+		if (fence !== null) continue;
+		const heading = line.match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/);
+		if (heading) return heading[1]!.trim();
+	}
+	return "";
+}
+
 // A site-level 404 can still return 200 + a short navigation shell. Do not reject
 // short pages generally: some valid pages are shorter than MIN_USEFUL_CONTENT.
 // A title alone is not enough: "404 Not Found - HTTP" can be a real article.
-// Require an error heading in the rendered body as evidence.
-export function isUnusableDeepSeekPage(content: string): boolean {
-	return content.length < 500 && /(?:^|[\s#])#{1,6}\s+(?:404\b|page not found\b|not found\b)/i.test(content);
+export function isUnusableDeepSeekPage(title: string, content: string): boolean {
+	const heading = firstMarkdownHeading(content);
+	if (heading !== "" && ERROR_TITLE.test(heading)) return true;
+	if (content.length >= 500) return false;
+	return ERROR_TITLE.test(text(title)) && /\b(?:404|page not found|not found)\b/i.test(content.slice(0, 200));
 }
 
 function parseResponse(value: unknown): DeepSeekResult[] {
@@ -316,7 +344,7 @@ export async function extractWithDeepSeek(
 		const page = rawData as { title?: unknown; content?: unknown };
 		const title = typeof page.title === "string" ? page.title.trim() : "";
 		const content = typeof page.content === "string" ? normalizeDeepSeekMarkdown(page.content).trim() : "";
-		if (!content || isUnusableDeepSeekPage(content)) {
+		if (!content || isUnusableDeepSeekPage(title, content)) {
 			activityMonitor.logComplete(activityId, response.status);
 			return null;
 		}

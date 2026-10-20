@@ -272,11 +272,13 @@ test("DeepSeek Fetch normalizes safe Markdown escapes while preserving code and 
 
 test("DeepSeek Fetch rejects error shells but keeps short valid pages", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
 	const shell = "Search / Fetch API is now available. \\# Page Not Found We could not find what you were looking for.";
+	const laterContent = "# HTTP status codes\n\n## 404 Not Found\n\nA real short page.\n\n```\n# 404 Not Found\n```";
 	const output = runChild(`
 		const responses = [
 			new Response(JSON.stringify({ title: "Page Not Found", content: ${JSON.stringify(shell)} }), { status: 200 }),
 			new Response(JSON.stringify({ title: "Bilibili", content: "Short but valid article body." }), { status: 200 }),
 			new Response(JSON.stringify({ title: "404 Not Found - HTTP", content: "A real short reference page." }), { status: 200 }),
+			new Response(JSON.stringify({ title: "HTTP status codes", content: ${JSON.stringify(laterContent)} }), { status: 200 }),
 		];
 		globalThis.fetch = async () => responses.shift();
 		const { extractWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
@@ -284,11 +286,13 @@ test("DeepSeek Fetch rejects error shells but keeps short valid pages", () => wi
 		const missing = await extractWithDeepSeek("https://example.com/missing", undefined, { lookup });
 		const short = await extractWithDeepSeek("https://example.com/short", undefined, { lookup });
 		const titledLikeError = await extractWithDeepSeek("https://example.com/reference", undefined, { lookup });
-		console.log(JSON.stringify({ missing, short, titledLikeError }));
+		const laterErrorHeading = await extractWithDeepSeek("https://example.com/status-codes", undefined, { lookup });
+		console.log(JSON.stringify({ missing, short, titledLikeError, laterErrorHeading }));
 	`, { PI_CODING_AGENT_DIR: home });
 	assert.equal(output.missing, null);
 	assert.equal(output.short.content, "Short but valid article body.");
 	assert.equal(output.titledLikeError.content, "A real short reference page.");
+	assert.equal(output.laterErrorHeading.title, "HTTP status codes");
 }));
 
 test("DeepSeek search content uses the same conservative Markdown normalization", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
