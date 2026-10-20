@@ -131,7 +131,7 @@ function normalizeInlineMarkdown(line: string): string {
 		.join("");
 }
 
-export function normalizeDeepSeekMarkdown(markdown: string): string {
+function normalizeDeepSeekMarkdown(markdown: string): string {
 	let fence: { char: string; length: number } | null = null;
 	return markdown
 		.split("\n")
@@ -184,7 +184,7 @@ function firstMarkdownHeading(content: string): string {
 // A site-level 404 can still return 200 + a short navigation shell. Do not reject
 // short pages generally: some valid pages are shorter than MIN_USEFUL_CONTENT.
 // A title alone is not enough: "404 Not Found - HTTP" can be a real article.
-export function isUnusableDeepSeekPage(title: string, content: string): boolean {
+function isUnusableDeepSeekPage(title: string, content: string): boolean {
 	// Long pages are real content even if their title or first heading happens to be an error term.
 	if (content.length >= 500) return false;
 	const heading = firstMarkdownHeading(content);
@@ -285,7 +285,8 @@ export async function searchWithDeepSeek(query: string, options: DeepSeekSearchO
 			snippet: (text(entry.summary) || text(entry.snippet)).slice(0, MAX_SNIPPET_CHARS),
 		});
 		if (options.includeContent) {
-			const content = typeof entry.content === "string" ? normalizeDeepSeekMarkdown(entry.content).trim() : "";
+			// Search content is not pre-escaped (unlike Fetch), so its backslashes are real text.
+			const content = typeof entry.content === "string" ? entry.content.trim() : "";
 			if (content) inlineContent.push({ url: resultUrl.href, title, content, error: null });
 		}
 		if (results.length >= numResults) break;

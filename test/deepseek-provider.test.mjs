@@ -295,16 +295,16 @@ test("DeepSeek Fetch rejects error shells but keeps short valid pages", () => wi
 	assert.equal(output.laterErrorHeading.title, "HTTP status codes");
 }));
 
-test("DeepSeek search content uses the same conservative Markdown normalization", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
+test("DeepSeek search content keeps its backslashes", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
 	const output = runChild(`
 		globalThis.fetch = async () => new Response(JSON.stringify({
-			results: [{ title: "A", url: "https://example.com/a", summary: "sum", content: "\\\\# Heading\\n\\n\\\\| table \\\\|" }],
+			results: [{ title: "A", url: "https://example.com/a", summary: "sum", content: "\\\\(x \\\\in A\\\\) in C:\\\\temp\\\\.config" }],
 		}), { status: 200 });
 		const { searchWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
 		const result = await searchWithDeepSeek("q", { includeContent: true });
 		console.log(JSON.stringify(result.inlineContent));
 	`, { PI_CODING_AGENT_DIR: home });
-	assert.equal(output[0].content, "# Heading\n\n| table |");
+	assert.equal(output[0].content, "\\(x \\in A\\) in C:\\temp\\.config");
 }));
 
 test("DeepSeek fenced code requires the opening fence length to close", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
