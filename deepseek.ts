@@ -185,9 +185,10 @@ function firstMarkdownHeading(content: string): string {
 // short pages generally: some valid pages are shorter than MIN_USEFUL_CONTENT.
 // A title alone is not enough: "404 Not Found - HTTP" can be a real article.
 export function isUnusableDeepSeekPage(title: string, content: string): boolean {
+	// Long pages are real content even if their title or first heading happens to be an error term.
+	if (content.length >= 500) return false;
 	const heading = firstMarkdownHeading(content);
 	if (heading !== "" && ERROR_TITLE.test(heading)) return true;
-	if (content.length >= 500) return false;
 	return ERROR_TITLE.test(text(title)) && /\b(?:404|page not found|not found)\b/i.test(content.slice(0, 200));
 }
 

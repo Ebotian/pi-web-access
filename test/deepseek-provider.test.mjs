@@ -333,7 +333,7 @@ test("DeepSeek fenced code requires the opening fence length to close", () => wi
 }));
 
 test("DeepSeek keeps a long article whose title starts with an error term", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
-	const longBody = `${"Content sentence. ".repeat(40)}`;
+	const longBody = `# 404 Not Found\n\n${"Content sentence. ".repeat(40)}`;
 	const output = runChild(`
 		globalThis.fetch = async () => new Response(JSON.stringify({ title: "404 Not Found - HTTP", content: ${JSON.stringify(longBody)} }), { status: 200 });
 		const { extractWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
