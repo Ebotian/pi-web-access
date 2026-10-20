@@ -276,16 +276,19 @@ test("DeepSeek Fetch rejects error shells but keeps short valid pages", () => wi
 		const responses = [
 			new Response(JSON.stringify({ title: "Page Not Found", content: ${JSON.stringify(shell)} }), { status: 200 }),
 			new Response(JSON.stringify({ title: "Bilibili", content: "Short but valid article body." }), { status: 200 }),
+			new Response(JSON.stringify({ title: "404 Not Found - HTTP", content: "A real short reference page." }), { status: 200 }),
 		];
 		globalThis.fetch = async () => responses.shift();
 		const { extractWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
 		const lookup = async () => [{ address: "93.184.216.34", family: 4 }];
 		const missing = await extractWithDeepSeek("https://example.com/missing", undefined, { lookup });
 		const short = await extractWithDeepSeek("https://example.com/short", undefined, { lookup });
-		console.log(JSON.stringify({ missing, short }));
+		const titledLikeError = await extractWithDeepSeek("https://example.com/reference", undefined, { lookup });
+		console.log(JSON.stringify({ missing, short, titledLikeError }));
 	`, { PI_CODING_AGENT_DIR: home });
 	assert.equal(output.missing, null);
 	assert.equal(output.short.content, "Short but valid article body.");
+	assert.equal(output.titledLikeError.content, "A real short reference page.");
 }));
 
 test("DeepSeek search content uses the same conservative Markdown normalization", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
@@ -298,4 +301,41 @@ test("DeepSeek search content uses the same conservative Markdown normalization"
 		console.log(JSON.stringify(result.inlineContent));
 	`, { PI_CODING_AGENT_DIR: home });
 	assert.equal(output[0].content, "# Heading\n\n| table |");
+}));
+
+test("DeepSeek fenced code requires the opening fence length to close", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
+	const content = [
+		"````",
+		"```",
+		"const re = /\\\\./;",
+		"```",
+		"````",
+		"\\# outside",
+	].join("\n");
+	const output = runChild(`
+		globalThis.fetch = async () => new Response(JSON.stringify({ title: "Article", content: ${JSON.stringify(content)} }), { status: 200 });
+		const { extractWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
+		const page = await extractWithDeepSeek("https://example.com/article", undefined, { lookup: async () => [{ address: "93.184.216.34", family: 4 }] });
+		console.log(JSON.stringify(page));
+	`, { PI_CODING_AGENT_DIR: home });
+	assert.equal(output.content, [
+		"````",
+		"```",
+		"const re = /\\\\./;",
+		"```",
+		"````",
+		"# outside",
+	].join("\n"));
+}));
+
+test("DeepSeek keeps a long article whose title starts with an error term", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
+	const longBody = `${"Content sentence. ".repeat(40)}`;
+	const output = runChild(`
+		globalThis.fetch = async () => new Response(JSON.stringify({ title: "404 Not Found - HTTP", content: ${JSON.stringify(longBody)} }), { status: 200 });
+		const { extractWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
+		const page = await extractWithDeepSeek("https://example.com/reference", undefined, { lookup: async () => [{ address: "93.184.216.34", family: 4 }] });
+		console.log(JSON.stringify(page));
+	`, { PI_CODING_AGENT_DIR: home });
+	assert.equal(output.title, "404 Not Found - HTTP");
+	assert.equal(output.content, longBody.trim());
 }));

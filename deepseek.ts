@@ -132,7 +132,7 @@ function normalizeInlineMarkdown(line: string): string {
 }
 
 export function normalizeDeepSeekMarkdown(markdown: string): string {
-	let fence: string | null = null;
+	let fence: { char: string; length: number } | null = null;
 	return markdown
 		.split("\n")
 		.map((line) => {
@@ -140,8 +140,12 @@ export function normalizeDeepSeekMarkdown(markdown: string): string {
 			if (match) {
 				const marker = match[1]!;
 				if (fence === null) {
-					fence = marker[0]!;
-				} else if (marker[0] === fence) {
+					fence = { char: marker[0]!, length: marker.length };
+				} else if (
+					marker[0] === fence.char &&
+					marker.length >= fence.length &&
+					line.slice(match[0].length).trim() === ""
+				) {
 					fence = null;
 				}
 				return line;
@@ -151,20 +155,12 @@ export function normalizeDeepSeekMarkdown(markdown: string): string {
 		.join("\n");
 }
 
-const ERROR_TITLE = /^(?:404\b|page not found\b|not found\b)/i;
-
-function firstMarkdownHeading(content: string): string {
-	const match = content.match(/^\s*#{1,6}\s+(.+)$/m);
-	return match?.[1]?.trim() ?? "";
-}
-
 // A site-level 404 can still return 200 + a short navigation shell. Do not reject
 // short pages generally: some valid pages are shorter than MIN_USEFUL_CONTENT.
-export function isUnusableDeepSeekPage(title: string, content: string): boolean {
-	const normalizedTitle = text(title);
-	if (ERROR_TITLE.test(normalizedTitle)) return true;
-	const heading = firstMarkdownHeading(content);
-	return heading !== "" && /^(?:404\b|page not found\b|not found\b)/i.test(heading) && content.length < 500;
+// A title alone is not enough: "404 Not Found - HTTP" can be a real article.
+// Require an error heading in the rendered body as evidence.
+export function isUnusableDeepSeekPage(content: string): boolean {
+	return content.length < 500 && /(?:^|[\s#])#{1,6}\s+(?:404\b|page not found\b|not found\b)/i.test(content);
 }
 
 function parseResponse(value: unknown): DeepSeekResult[] {
@@ -320,7 +316,7 @@ export async function extractWithDeepSeek(
 		const page = rawData as { title?: unknown; content?: unknown };
 		const title = typeof page.title === "string" ? page.title.trim() : "";
 		const content = typeof page.content === "string" ? normalizeDeepSeekMarkdown(page.content).trim() : "";
-		if (!content || isUnusableDeepSeekPage(title, content)) {
+		if (!content || isUnusableDeepSeekPage(content)) {
 			activityMonitor.logComplete(activityId, response.status);
 			return null;
 		}
