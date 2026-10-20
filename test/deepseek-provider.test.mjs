@@ -240,3 +240,62 @@ test("DeepSeek Fetch redacts errors, returns null for empty content, and refuses
 	assert.match(output.privateError, /Blocked internal address/);
 	assert.deepEqual(output.calls, ["https://api.deepseek.com/v1/tools/fetch", "https://api.deepseek.com/v1/tools/fetch"]);
 }));
+
+test("DeepSeek Fetch normalizes safe Markdown escapes while preserving code and link escapes", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
+	const escaped = [
+		"\\# Heading",
+		"PARAM \\| VALUE",
+		"https\\:\\/\\/example.com\\/a",
+		"\\*literal\\* and \\`code\\` and \\[link\\]",
+		"`\\# inline code`",
+		"```",
+		"\\# fenced",
+		"```",
+	].join("\n");
+	const output = runChild(`
+		globalThis.fetch = async () => new Response(JSON.stringify({ title: "Article", content: ${JSON.stringify(escaped)} }), { status: 200 });
+		const { extractWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
+		const page = await extractWithDeepSeek("https://example.com/article", undefined, { lookup: async () => [{ address: "93.184.216.34", family: 4 }] });
+		console.log(JSON.stringify(page));
+	`, { PI_CODING_AGENT_DIR: home });
+	assert.equal(output.content, [
+		"# Heading",
+		"PARAM | VALUE",
+		"https://example.com/a",
+		"\\*literal\\* and \\`code\\` and \\[link\\]",
+		"`\\# inline code`",
+		"```",
+		"\\# fenced",
+		"```",
+	].join("\n"));
+}));
+
+test("DeepSeek Fetch rejects error shells but keeps short valid pages", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
+	const shell = "Search / Fetch API is now available. \\# Page Not Found We could not find what you were looking for.";
+	const output = runChild(`
+		const responses = [
+			new Response(JSON.stringify({ title: "Page Not Found", content: ${JSON.stringify(shell)} }), { status: 200 }),
+			new Response(JSON.stringify({ title: "Bilibili", content: "Short but valid article body." }), { status: 200 }),
+		];
+		globalThis.fetch = async () => responses.shift();
+		const { extractWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
+		const lookup = async () => [{ address: "93.184.216.34", family: 4 }];
+		const missing = await extractWithDeepSeek("https://example.com/missing", undefined, { lookup });
+		const short = await extractWithDeepSeek("https://example.com/short", undefined, { lookup });
+		console.log(JSON.stringify({ missing, short }));
+	`, { PI_CODING_AGENT_DIR: home });
+	assert.equal(output.missing, null);
+	assert.equal(output.short.content, "Short but valid article body.");
+}));
+
+test("DeepSeek search content uses the same conservative Markdown normalization", () => withHome({ deepseekApiKey: "ds-key" }, (home) => {
+	const output = runChild(`
+		globalThis.fetch = async () => new Response(JSON.stringify({
+			results: [{ title: "A", url: "https://example.com/a", summary: "sum", content: "\\\\# Heading\\n\\n\\\\| table \\\\|" }],
+		}), { status: 200 });
+		const { searchWithDeepSeek } = await import(${JSON.stringify(deepseekModuleUrl)});
+		const result = await searchWithDeepSeek("q", { includeContent: true });
+		console.log(JSON.stringify(result.inlineContent));
+	`, { PI_CODING_AGENT_DIR: home });
+	assert.equal(output[0].content, "# Heading\n\n| table |");
+}));

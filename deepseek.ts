@@ -115,6 +115,58 @@ function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
+// DeepSeek Fetch escapes Markdown punctuation even when the content is already Markdown.
+// Keep escapes that could change emphasis, code spans and links; unescape only the safe subset.
+function unescapeMarkdownSegment(segment: string): string {
+	return segment.replace(/\\([/.,:()&+#>|!_\-"'])/g, (match, char: string, offset: number, whole: string) => {
+		if (char === "!" && whole[offset + 2] === "[") return match;
+		return char;
+	});
+}
+
+function normalizeInlineMarkdown(line: string): string {
+	return line
+		.split(/(`+[^`]*`+)/g)
+		.map((part, index) => (index % 2 === 0 ? unescapeMarkdownSegment(part) : part))
+		.join("");
+}
+
+export function normalizeDeepSeekMarkdown(markdown: string): string {
+	let fence: string | null = null;
+	return markdown
+		.split("\n")
+		.map((line) => {
+			const match = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+			if (match) {
+				const marker = match[1]!;
+				if (fence === null) {
+					fence = marker[0]!;
+				} else if (marker[0] === fence) {
+					fence = null;
+				}
+				return line;
+			}
+			return fence === null ? normalizeInlineMarkdown(line) : line;
+		})
+		.join("\n");
+}
+
+const ERROR_TITLE = /^(?:404\b|page not found\b|not found\b)/i;
+
+function firstMarkdownHeading(content: string): string {
+	const match = content.match(/^\s*#{1,6}\s+(.+)$/m);
+	return match?.[1]?.trim() ?? "";
+}
+
+// A site-level 404 can still return 200 + a short navigation shell. Do not reject
+// short pages generally: some valid pages are shorter than MIN_USEFUL_CONTENT.
+export function isUnusableDeepSeekPage(title: string, content: string): boolean {
+	const normalizedTitle = text(title);
+	if (ERROR_TITLE.test(normalizedTitle)) return true;
+	const heading = firstMarkdownHeading(content);
+	return heading !== "" && /^(?:404\b|page not found\b|not found\b)/i.test(heading) && content.length < 500;
+}
+
 function parseResponse(value: unknown): DeepSeekResult[] {
 	const results = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>).results : undefined;
 	if (!Array.isArray(results)) throw new Error("DeepSeek returned invalid response: expected a results array");
@@ -208,7 +260,7 @@ export async function searchWithDeepSeek(query: string, options: DeepSeekSearchO
 			snippet: (text(entry.summary) || text(entry.snippet)).slice(0, MAX_SNIPPET_CHARS),
 		});
 		if (options.includeContent) {
-			const content = typeof entry.content === "string" ? entry.content.trim() : "";
+			const content = typeof entry.content === "string" ? normalizeDeepSeekMarkdown(entry.content).trim() : "";
 			if (content) inlineContent.push({ url: resultUrl.href, title, content, error: null });
 		}
 		if (results.length >= numResults) break;
@@ -266,15 +318,16 @@ export async function extractWithDeepSeek(
 			throw new Error("DeepSeek Fetch returned an unexpected response shape");
 		}
 		const page = rawData as { title?: unknown; content?: unknown };
-		const content = typeof page.content === "string" ? page.content.trim() : "";
-		if (!content) {
+		const title = typeof page.title === "string" ? page.title.trim() : "";
+		const content = typeof page.content === "string" ? normalizeDeepSeekMarkdown(page.content).trim() : "";
+		if (!content || isUnusableDeepSeekPage(title, content)) {
 			activityMonitor.logComplete(activityId, response.status);
 			return null;
 		}
 		activityMonitor.logComplete(activityId, response.status);
 		return {
 			url,
-			title: typeof page.title === "string" ? page.title.trim() : "",
+			title,
 			content,
 			error: null,
 		};
